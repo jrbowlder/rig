@@ -12,7 +12,7 @@ from datetime import date
 from pathlib import Path
 
 from rig.db import connect
-from rig.schedule import add_months, compute_due
+from rig.schedule import add_months, compute_due, matches_keywords, seed_schedule
 
 TODAY = date(2026, 11, 12)
 
@@ -23,6 +23,7 @@ class DueEngineTest(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         os.environ["RIG_DB"] = str(Path(self.tmp.name) / "test.db")
+        self.addCleanup(os.environ.pop, "RIG_DB", None)
         self.conn = connect()
         self.addCleanup(self.conn.close)
         self.vehicle_id = self.add_vehicle(0)
@@ -36,6 +37,8 @@ class DueEngineTest(unittest.TestCase):
             (odometer,),
         )
         self.conn.commit()
+        # Rules are created with the vehicle in the real code path.
+        seed_schedule(self.conn, cur.lastrowid)
         return cur.lastrowid
 
     def set_odometer(self, miles: int) -> None:
@@ -110,6 +113,25 @@ class DueEngineTest(unittest.TestCase):
         self.add_service("wiper blades", "2026-11-10", 61500)
         row = self.due_for("oil change")
         self.assertEqual(row["status"], "never")
+
+    def test_coil_pack_is_not_an_oil_change(self) -> None:
+        """The old substring test matched 'oil' inside 'coil'."""
+        self.set_odometer(20000)
+        self.add_service("coil pack replaced", "2026-11-01", 20000)
+        row = self.due_for("oil change")
+        self.assertEqual(row["status"], "never")
+
+    def test_boiling_over_is_not_an_oil_change(self) -> None:
+        self.set_odometer(20000)
+        self.add_service("boiling over, coolant topped up", "2026-11-01", 20000)
+        row = self.due_for("oil change")
+        self.assertEqual(row["status"], "never")
+
+    def test_plural_still_matches(self) -> None:
+        self.set_odometer(61200)
+        self.add_service("tyres - 4", "2026-11-01", 61200)
+        row = self.due_for("tyres")
+        self.assertEqual(row["last"]["service"], "tyres - 4")
 
     def test_due_soon_window(self) -> None:
         self.set_odometer(64500)

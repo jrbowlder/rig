@@ -6,6 +6,7 @@ set, the job is due at whichever limit arrives first.
 
 from __future__ import annotations
 
+import re
 import sqlite3
 from calendar import monthrange
 from datetime import date, datetime
@@ -53,6 +54,22 @@ def seed_schedule(conn: sqlite3.Connection, vehicle_id: int) -> None:
     conn.commit()
 
 
+def matches_keywords(text: str, keywords: tuple[str, ...]) -> bool:
+    """True if any keyword appears in text as a whole word.
+
+    A plain substring test is wrong here: "oil" sits inside "coil pack" and
+    "boiling over", so a coil replacement would cancel an oil change. The
+    lookarounds require a non-word character (or the string edge) either side.
+    A trailing "s" is allowed so "tyre" still matches "tyres".
+    """
+    lowered = text.lower()
+    for keyword in keywords:
+        pattern = rf"(?<!\w){re.escape(keyword.lower())}s?(?!\w)"
+        if re.search(pattern, lowered):
+            return True
+    return False
+
+
 def last_service_for(
     conn: sqlite3.Connection, vehicle_id: int, job: str
 ) -> sqlite3.Row | None:
@@ -67,8 +84,7 @@ def last_service_for(
         (vehicle_id,),
     ).fetchall()
     for row in rows:
-        text = row["service"].lower()
-        if any(word in text for word in keywords):
+        if matches_keywords(row["service"], keywords):
             return row
     return None
 
@@ -91,9 +107,12 @@ def describe_left(miles_left: int | None, days_left: int | None) -> str:
 def compute_due(
     conn: sqlite3.Connection, vehicle: sqlite3.Row, today: date | None = None
 ) -> list[dict]:
-    """Work out where every scheduled job stands for one vehicle."""
+    """Work out where every scheduled job stands for one vehicle.
+
+    Read-only: it expects the vehicle's rules to exist already. They are created
+    with the vehicle, and backfilled for vehicles that predate that.
+    """
     today = today or date.today()
-    seed_schedule(conn, vehicle["id"])
 
     rules = conn.execute(
         "SELECT * FROM schedule WHERE vehicle_id = ? ORDER BY job",

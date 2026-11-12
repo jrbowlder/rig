@@ -59,6 +59,13 @@ python3 -m rig schedule --vehicle Disco
 python3 -m rig interval --vehicle Disco --job "oil change" --miles 7500
 ```
 
+Schedule something the defaults do not cover, and drop it again:
+
+```sh
+python3 -m rig job add --vehicle Disco --job "diff oil" --miles 30000 --months 36
+python3 -m rig job remove --vehicle Disco --job "diff oil"
+```
+
 The default rules are shipped with the app: oil change every 5,000 miles or 12
 months, air filter 15,000 or 24, brake fluid 30,000 or 24, tyres 30,000 or 60,
 annual inspection every 12 months.
@@ -77,9 +84,10 @@ rounding drift.
 
 ## Running the tests
 
-The due engine has 12 tests covering both limits firing independently, the exact
-limit, the due-soon window, and month arithmetic across short and leap months.
-They use a temporary database, so your real one is never touched.
+The due engine and the command line have 25 tests covering both limits firing
+independently, the exact limit, the due-soon window, month arithmetic across
+short and leap months, keyword matching, and the CLI reading a read-only
+database. They use a temporary database, so your real one is never touched.
 
 ```sh
 python3 -m unittest discover -s tests

@@ -8,8 +8,9 @@ import sqlite3
 import sys
 from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
+from pathlib import Path
 
-from .db import connect
+from .db import connect, db_path
 from .schedule import compute_due, describe_left, seed_schedule
 
 
@@ -18,7 +19,9 @@ def parse_money(text: str) -> int:
     cleaned = text.strip().replace("$", "").replace(",", "")
     try:
         return int((Decimal(cleaned) * 100).to_integral_value())
-    except (InvalidOperation, ValueError):
+    except (InvalidOperation, ValueError, OverflowError):
+        # OverflowError is not theoretical: Decimal('Infinity') converts to a
+        # Decimal happily and only fails at int(), so it needs naming here.
         raise argparse.ArgumentTypeError(f"not a valid amount: {text!r}")
 
 
@@ -27,6 +30,42 @@ def format_money(cents: int) -> str:
     sign = "-" if cents < 0 else ""
     cents = abs(cents)
     return f"{sign}${cents // 100:,}.{cents % 100:02d}"
+
+
+def format_dollars(cents: int) -> str:
+    """The same number without the dollar sign, for CSV output."""
+    sign = "-" if cents < 0 else ""
+    cents = abs(cents)
+    return f"{sign}{cents // 100}.{cents % 100:02d}"
+
+
+def render_table(
+    headers: list[str], rows: list[list[str]], right: set[int] | None = None
+) -> list[str]:
+    """Lay out a table whose columns are as wide as their widest cell.
+
+    Hardcoded widths look fine until a vehicle is called "Range Rover Classic",
+    at which point the columns run together.
+    """
+    right = right or set()
+    widths = [len(header) for header in headers]
+    for row in rows:
+        for index, cell in enumerate(row):
+            widths[index] = max(widths[index], len(str(cell)))
+
+    def line(cells: list[str]) -> str:
+        parts = []
+        for index, cell in enumerate(cells):
+            text = str(cell)
+            parts.append(
+                text.rjust(widths[index])
+                if index in right
+                else text.ljust(widths[index])
+            )
+        return "  ".join(parts).rstrip()
+
+    separator = "-" * (sum(widths) + 2 * (len(widths) - 1))
+    return [line(headers), separator] + [line(row) for row in rows]
 
 
 def lookup_vehicle(conn: sqlite3.Connection, ref: str) -> sqlite3.Row:
@@ -72,6 +111,14 @@ def cmd_add_vehicle(args: argparse.Namespace) -> int:
         conn.close()
         return 1
 
+    # The rules belong to the vehicle, so they are created with it. That is what
+    # lets `due` and `schedule` stay read-only.
+    new_id = cur.lastrowid
+    if new_id is None:
+        conn.close()
+        raise SystemExit("Could not read the new vehicle's id back.")
+    seed_schedule(conn, new_id)
+
     conn.commit()
     conn.close()
     print(f"Added vehicle #{cur.lastrowid}: {args.name}")
@@ -87,13 +134,17 @@ def cmd_vehicles(args: argparse.Namespace) -> int:
         print("No vehicles yet. Add one with: python3 -m rig add-vehicle --name ...")
         return 0
 
+    table = []
     for row in rows:
         description = " ".join(
             str(part) for part in (row["year"], row["make"], row["model"]) if part
         )
-        print(
-            f"#{row['id']:<3} {row['name']:<14} {row['odometer']:>7} mi   {description}"
+        table.append(
+            [f"#{row['id']}", row["name"], f"{row['odometer']:,} mi", description]
         )
+
+    for line in render_table(["#", "Name", "Odometer", "Description"], table, {0, 2}):
+        print(line)
     return 0
 
 
@@ -107,6 +158,10 @@ def cmd_log(args: argparse.Namespace) -> int:
     except ValueError:
         conn.close()
         raise SystemExit(f"Date must be YYYY-MM-DD, got {service_date!r}")
+
+    if args.odo is not None and args.odo < 0:
+        conn.close()
+        raise SystemExit("Odometer cannot be negative.")
 
     conn.execute(
         """
@@ -142,7 +197,9 @@ def cmd_log(args: argparse.Namespace) -> int:
     if moved:
         print(f"  odometer now {args.odo:,} mi")
     elif args.odo is not None and args.odo < vehicle["odometer"]:
-        print(f"  note: {args.odo:,} mi is below the recorded {vehicle['odometer']:,} mi")
+        print(
+            f"  note: {args.odo:,} mi is below the recorded {vehicle['odometer']:,} mi"
+        )
     return 0
 
 
@@ -184,43 +241,27 @@ def cmd_history(args: argparse.Namespace) -> int:
         print(f"No service records for {vehicle['name']} yet.")
         return 0
 
-    total = 0
+    table = []
     for row in rows:
         odo = f"{row['odometer']:,} mi" if row["odometer"] is not None else "-"
-        print(
-            f"{row['service_date']}  {odo:>12}  {row['service']:<26}"
-            f" {format_money(row['cost_cents']):>11}"
+        table.append(
+            [row["service_date"], odo, row["service"], format_money(row["cost_cents"])]
         )
-        if row["notes"]:
-            print(f"{'':>12}  {'':>12}  {row['notes']}")
-        total += row["cost_cents"]
 
-    print()
+    for line in render_table(["Date", "Mileage", "Service", "Cost"], table, {1, 3}):
+        print(line)
+
+    notes = [row["notes"] for row in rows if row["notes"]]
+    if notes:
+        print()
+        for note in notes:
+            print(f"  note: {note}")
+
+    total = sum(row["cost_cents"] for row in rows)
     record_word = "record" if len(rows) == 1 else "records"
+    print()
     print(f"{len(rows)} {record_word}, total {format_money(total)}")
     return 0
-
-
-def render_due_table(results: list[dict]) -> None:
-    print(
-        f"{'Job':<20}{'Last done':<24}{'Next miles':<14}{'Next date':<13}Status"
-    )
-    print("-" * 96)
-    for row in results:
-        last = row["last"]
-        last_text = (
-            f"{last['service_date']} @ {last['odometer']:,}"
-            if last is not None and last["odometer"] is not None
-            else (last["service_date"] if last is not None else "never recorded")
-        )
-        next_miles = f"{row['due_odo']:,} mi" if row["due_odo"] is not None else "-"
-        next_date = row["due_date"].isoformat() if row["due_date"] is not None else "-"
-        status = describe_left(row["miles_left"], row["days_left"])
-        if row["status"] == "never":
-            status = "never recorded, treat as due"
-        print(
-            f"{row['job']:<20}{last_text:<24}{next_miles:<14}{next_date:<13}{status}"
-        )
 
 
 def cmd_due(args: argparse.Namespace) -> int:
@@ -238,7 +279,34 @@ def cmd_due(args: argparse.Namespace) -> int:
     for vehicle in vehicles:
         results = compute_due(conn, vehicle)
         print(f"\n{vehicle['name']}  ({vehicle['odometer']:,} mi)")
-        render_due_table(results)
+
+        table = []
+        for row in results:
+            last = row["last"]
+            if last is None:
+                last_text = "never recorded"
+            elif last["odometer"] is None:
+                last_text = last["service_date"]
+            else:
+                last_text = f"{last['service_date']} @ {last['odometer']:,}"
+
+            next_miles = (
+                f"{row['due_odo']:,} mi" if row["due_odo"] is not None else "-"
+            )
+            next_date = (
+                row["due_date"].isoformat() if row["due_date"] is not None else "-"
+            )
+            status = (
+                "never recorded, treat as due"
+                if row["status"] == "never"
+                else describe_left(row["miles_left"], row["days_left"])
+            )
+            table.append([row["job"], last_text, next_miles, next_date, status])
+
+        for line in render_table(
+            ["Job", "Last done", "Next miles", "Next date", "Status"], table
+        ):
+            print(line)
 
         urgent = [
             r for r in results if r["status"] in ("overdue", "never", "due soon")
@@ -255,19 +323,22 @@ def cmd_due(args: argparse.Namespace) -> int:
 def cmd_schedule(args: argparse.Namespace) -> int:
     conn = connect()
     vehicle = lookup_vehicle(conn, args.vehicle)
-    seed_schedule(conn, vehicle["id"])
     rows = conn.execute(
         "SELECT * FROM schedule WHERE vehicle_id = ? ORDER BY job", (vehicle["id"],)
     ).fetchall()
     conn.close()
 
     print(f"{vehicle['name']}: schedule rules")
-    print(f"{'Job':<20}{'Every miles':<14}Every months")
-    print("-" * 50)
-    for row in rows:
-        miles = f"{row['interval_miles']:,}" if row["interval_miles"] else "-"
-        months = str(row["interval_months"]) if row["interval_months"] else "-"
-        print(f"{row['job']:<20}{miles:<14}{months}")
+    table = [
+        [
+            row["job"],
+            f"{row['interval_miles']:,}" if row["interval_miles"] else "-",
+            str(row["interval_months"]) if row["interval_months"] else "-",
+        ]
+        for row in rows
+    ]
+    for line in render_table(["Job", "Every miles", "Every months"], table, {1, 2}):
+        print(line)
     return 0
 
 
@@ -277,7 +348,6 @@ def cmd_interval(args: argparse.Namespace) -> int:
 
     conn = connect()
     vehicle = lookup_vehicle(conn, args.vehicle)
-    seed_schedule(conn, vehicle["id"])
 
     row = conn.execute(
         "SELECT * FROM schedule WHERE vehicle_id = ? AND lower(job) = lower(?)",
@@ -292,7 +362,10 @@ def cmd_interval(args: argparse.Namespace) -> int:
             )
         ]
         conn.close()
-        raise SystemExit(f"No job {args.job!r}. Jobs on {vehicle['name']}: {', '.join(jobs)}")
+        raise SystemExit(
+            f"No job {args.job!r}. Jobs on {vehicle['name']}: {', '.join(jobs)}. "
+            "Add one with: rig job add"
+        )
 
     miles = row["interval_miles"] if args.miles is None else (args.miles or None)
     months = row["interval_months"] if args.months is None else (args.months or None)
@@ -315,6 +388,69 @@ def cmd_interval(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_job_add(args: argparse.Namespace) -> int:
+    if args.miles is None and args.months is None:
+        raise SystemExit("Give --miles, --months, or both.")
+    if args.miles is not None and args.miles <= 0:
+        raise SystemExit("--miles must be more than zero for a new job.")
+    if args.months is not None and args.months <= 0:
+        raise SystemExit("--months must be more than zero for a new job.")
+
+    job = args.job.strip()
+    if not job:
+        raise SystemExit("Job needs a name.")
+
+    conn = connect()
+    vehicle = lookup_vehicle(conn, args.vehicle)
+
+    existing = conn.execute(
+        "SELECT job FROM schedule WHERE vehicle_id = ? AND lower(job) = lower(?)",
+        (vehicle["id"], job),
+    ).fetchone()
+    if existing is not None:
+        conn.close()
+        raise SystemExit(
+            f"{vehicle['name']} already has {existing['job']!r}. "
+            "Use interval to change it."
+        )
+
+    conn.execute(
+        """
+        INSERT INTO schedule (vehicle_id, job, interval_miles, interval_months)
+        VALUES (?, ?, ?, ?)
+        """,
+        (vehicle["id"], job, args.miles, args.months),
+    )
+    conn.commit()
+    conn.close()
+
+    miles = args.miles if args.miles else "-"
+    months = args.months if args.months else "-"
+    print(f"Added {job!r} to {vehicle['name']}: {miles} mi / {months} mo")
+    return 0
+
+
+def cmd_job_remove(args: argparse.Namespace) -> int:
+    conn = connect()
+    vehicle = lookup_vehicle(conn, args.vehicle)
+    row = conn.execute(
+        "SELECT job FROM schedule WHERE vehicle_id = ? AND lower(job) = lower(?)",
+        (vehicle["id"], args.job.strip()),
+    ).fetchone()
+    if row is None:
+        conn.close()
+        raise SystemExit(f"{vehicle['name']} has no job {args.job!r}.")
+
+    conn.execute(
+        "DELETE FROM schedule WHERE vehicle_id = ? AND job = ?",
+        (vehicle["id"], row["job"]),
+    )
+    conn.commit()
+    conn.close()
+    print(f"Removed {row['job']!r} from {vehicle['name']}")
+    return 0
+
+
 def cmd_spend(args: argparse.Namespace) -> int:
     conn = connect()
 
@@ -323,7 +459,7 @@ def cmd_spend(args: argparse.Namespace) -> int:
     if args.vehicle:
         where.append("v.id = ?")
         params.append(lookup_vehicle(conn, args.vehicle)["id"])
-    if args.year:
+    if args.year is not None:
         where.append("substr(s.service_date, 1, 4) = ?")
         params.append(str(args.year))
 
@@ -348,23 +484,24 @@ def cmd_spend(args: argparse.Namespace) -> int:
         print("No service records match that.")
         return 0
 
-    print(f"{'Vehicle':<16}{'Year':<8}{'Records':>8}{'Cost':>14}")
-    print("-" * 46)
-    total_cost = total_records = 0
-    for row in rows:
-        print(
-            f"{row['vehicle']:<16}{row['year']:<8}{row['records']:>8}"
-            f"{format_money(row['cost']):>14}"
-        )
-        total_cost += row["cost"]
-        total_records += row["records"]
+    table = [
+        [row["vehicle"], row["year"], str(row["records"]), format_money(row["cost"])]
+        for row in rows
+    ]
+    total_cost = sum(row["cost"] for row in rows)
+    total_records = sum(row["records"] for row in rows)
+    table.append(["Total", "", str(total_records), format_money(total_cost)])
 
-    print("-" * 46)
-    print(f"{'Total':<24}{total_records:>8}{format_money(total_cost):>14}")
+    for line in render_table(["Vehicle", "Year", "Records", "Cost"], table, {2, 3}):
+        print(line)
     return 0
 
 
 def cmd_export(args: argparse.Namespace) -> int:
+    target = Path(args.out).expanduser().resolve()
+    if target == db_path().resolve():
+        raise SystemExit("That is the database file. Pick a different name for the CSV.")
+
     conn = connect()
     rows = conn.execute(
         """
@@ -377,11 +514,9 @@ def cmd_export(args: argparse.Namespace) -> int:
     ).fetchall()
     conn.close()
 
-    with open(args.out, "w", newline="", encoding="utf-8") as handle:
+    with open(target, "w", newline="", encoding="utf-8") as handle:
         writer = csv.writer(handle)
-        writer.writerow(
-            ["vehicle", "date", "service", "odometer", "cost", "notes"]
-        )
+        writer.writerow(["vehicle", "date", "service", "odometer", "cost", "notes"])
         for row in rows:
             writer.writerow(
                 [
@@ -389,12 +524,12 @@ def cmd_export(args: argparse.Namespace) -> int:
                     row["service_date"],
                     row["service"],
                     row["odometer"] if row["odometer"] is not None else "",
-                    f"{row['cost_cents'] // 100}.{row['cost_cents'] % 100:02d}",
+                    format_dollars(row["cost_cents"]),
                     row["notes"] or "",
                 ]
             )
 
-    print(f"Wrote {len(rows)} records to {args.out}")
+    print(f"Wrote {len(rows)} records to {target}")
     return 0
 
 
@@ -451,6 +586,21 @@ def build_parser() -> argparse.ArgumentParser:
     interval.add_argument("--miles", type=int, help="Miles interval, 0 for none")
     interval.add_argument("--months", type=int, help="Months interval, 0 for none")
     interval.set_defaults(func=cmd_interval)
+
+    job = subparsers.add_parser("job", help="Add or remove a scheduled job")
+    job_subparsers = job.add_subparsers(dest="job_command", required=True)
+
+    job_add = job_subparsers.add_parser("add", help="Schedule a new job")
+    job_add.add_argument("--vehicle", required=True, help="Vehicle name or #id")
+    job_add.add_argument("--job", required=True, help='Job name, e.g. "diff oil"')
+    job_add.add_argument("--miles", type=int, help="Miles interval")
+    job_add.add_argument("--months", type=int, help="Months interval")
+    job_add.set_defaults(func=cmd_job_add)
+
+    job_remove = job_subparsers.add_parser("remove", help="Stop scheduling a job")
+    job_remove.add_argument("--vehicle", required=True, help="Vehicle name or #id")
+    job_remove.add_argument("--job", required=True, help="Job name")
+    job_remove.set_defaults(func=cmd_job_remove)
 
     spend = subparsers.add_parser("spend", help="Totals by vehicle and year")
     spend.add_argument("--vehicle", help="Vehicle name or #id (default: all)")
