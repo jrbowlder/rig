@@ -29,5 +29,40 @@ python3 -m rig add-vehicle --name Disco --year 1994 --make Land --model Rover --
 python3 -m rig vehicles
 ```
 
+Log work as it happens. A record can move the odometer forward, but never back:
+
+```sh
+python3 -m rig log --vehicle Disco --service "oil change" --odo 185900 --cost 68.40
+python3 -m rig log --vehicle Disco --service "fuel pump" --cost 240 --notes "Bosch, from Rimmer"
+```
+
+Update the odometer on its own, and read the history back:
+
+```sh
+python3 -m rig odo --vehicle Forester --miles 61800
+python3 -m rig history --vehicle Forester
+```
+
+Ask what needs doing. Each job is measured by mileage and by date, and it is
+due at whichever limit arrives first:
+
+```sh
+python3 -m rig due
+python3 -m rig due --vehicle Disco
+```
+
+Change an interval if your vehicle wants different numbers. Zero removes a
+limit, so `--miles 0` leaves date-only:
+
+```sh
+python3 -m rig schedule --vehicle Disco
+python3 -m rig interval --vehicle Disco --job "oil change" --miles 7500
+```
+
+The default rules are shipped with the app: oil change every 5,000 miles or 12
+months, air filter 15,000 or 24, brake fluid 30,000 or 24, tyres 30,000 or 60,
+annual inspection every 12 months.
+
 The database is a single SQLite file, `rig.db`, created automatically on first
-run and ignored by git.
+run and ignored by git. Money is stored as whole cents, so totals never pick up
+rounding drift.

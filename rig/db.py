@@ -20,6 +20,28 @@ CREATE TABLE IF NOT EXISTS vehicles (
     odometer         INTEGER NOT NULL DEFAULT 0,
     odometer_updated TEXT
 );
+
+CREATE TABLE IF NOT EXISTS services (
+    id           INTEGER PRIMARY KEY,
+    vehicle_id   INTEGER NOT NULL REFERENCES vehicles(id),
+    service      TEXT NOT NULL,
+    service_date TEXT NOT NULL,
+    odometer     INTEGER,
+    cost_cents   INTEGER NOT NULL DEFAULT 0,
+    notes        TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_services_vehicle
+    ON services (vehicle_id, service_date);
+
+CREATE TABLE IF NOT EXISTS schedule (
+    id              INTEGER PRIMARY KEY,
+    vehicle_id      INTEGER NOT NULL REFERENCES vehicles(id),
+    job             TEXT NOT NULL,
+    interval_miles  INTEGER,
+    interval_months INTEGER,
+    UNIQUE (vehicle_id, job)
+);
 """
 
 
@@ -34,5 +56,6 @@ def connect() -> sqlite3.Connection:
     path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(path)
     conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA foreign_keys = ON")
     conn.executescript(SCHEMA)
     return conn
