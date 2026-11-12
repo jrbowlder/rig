@@ -1,0 +1,8 @@
+# Build artefacts
+__pycache__/
+*.pyc
+.venv/
+
+# Local data, never committed
+rig.db
+*.db
