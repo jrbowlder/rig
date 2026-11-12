@@ -17,7 +17,7 @@ Clone the repo and run it. There is nothing to install: `rig` uses only the
 Python standard library, so Python 3.10 or newer is the only requirement.
 
 ```sh
-git clone git@github.com:jrbowlder/rig.git
+git clone https://github.com/jrbowlder/rig.git
 cd rig
 python3 -m rig --help
 ```
