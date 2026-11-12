@@ -63,6 +63,24 @@ The default rules are shipped with the app: oil change every 5,000 miles or 12
 months, air filter 15,000 or 24, brake fluid 30,000 or 24, tyres 30,000 or 60,
 annual inspection every 12 months.
 
+See what the fleet has cost, by vehicle and year, and get it out as a spreadsheet:
+
+```sh
+python3 -m rig spend
+python3 -m rig spend --vehicle Disco --year 2026
+python3 -m rig export --out rig.csv
+```
+
 The database is a single SQLite file, `rig.db`, created automatically on first
 run and ignored by git. Money is stored as whole cents, so totals never pick up
 rounding drift.
+
+## Running the tests
+
+The due engine has 12 tests covering both limits firing independently, the exact
+limit, the due-soon window, and month arithmetic across short and leap months.
+They use a temporary database, so your real one is never touched.
+
+```sh
+python3 -m unittest discover -s tests
+```

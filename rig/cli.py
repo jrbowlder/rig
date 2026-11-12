@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import sqlite3
 import sys
 from datetime import date, datetime
@@ -314,6 +315,89 @@ def cmd_interval(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_spend(args: argparse.Namespace) -> int:
+    conn = connect()
+
+    where = []
+    params: list[object] = []
+    if args.vehicle:
+        where.append("v.id = ?")
+        params.append(lookup_vehicle(conn, args.vehicle)["id"])
+    if args.year:
+        where.append("substr(s.service_date, 1, 4) = ?")
+        params.append(str(args.year))
+
+    clause = f"WHERE {' AND '.join(where)}" if where else ""
+    rows = conn.execute(
+        f"""
+        SELECT v.name AS vehicle,
+               substr(s.service_date, 1, 4) AS year,
+               COUNT(*) AS records,
+               SUM(s.cost_cents) AS cost
+        FROM services s
+        JOIN vehicles v ON v.id = s.vehicle_id
+        {clause}
+        GROUP BY v.name, year
+        ORDER BY v.name, year
+        """,
+        params,
+    ).fetchall()
+    conn.close()
+
+    if not rows:
+        print("No service records match that.")
+        return 0
+
+    print(f"{'Vehicle':<16}{'Year':<8}{'Records':>8}{'Cost':>14}")
+    print("-" * 46)
+    total_cost = total_records = 0
+    for row in rows:
+        print(
+            f"{row['vehicle']:<16}{row['year']:<8}{row['records']:>8}"
+            f"{format_money(row['cost']):>14}"
+        )
+        total_cost += row["cost"]
+        total_records += row["records"]
+
+    print("-" * 46)
+    print(f"{'Total':<24}{total_records:>8}{format_money(total_cost):>14}")
+    return 0
+
+
+def cmd_export(args: argparse.Namespace) -> int:
+    conn = connect()
+    rows = conn.execute(
+        """
+        SELECT v.name AS vehicle, s.service_date, s.service, s.odometer,
+               s.cost_cents, s.notes
+        FROM services s
+        JOIN vehicles v ON v.id = s.vehicle_id
+        ORDER BY v.name, s.service_date
+        """
+    ).fetchall()
+    conn.close()
+
+    with open(args.out, "w", newline="", encoding="utf-8") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(
+            ["vehicle", "date", "service", "odometer", "cost", "notes"]
+        )
+        for row in rows:
+            writer.writerow(
+                [
+                    row["vehicle"],
+                    row["service_date"],
+                    row["service"],
+                    row["odometer"] if row["odometer"] is not None else "",
+                    f"{row['cost_cents'] // 100}.{row['cost_cents'] % 100:02d}",
+                    row["notes"] or "",
+                ]
+            )
+
+    print(f"Wrote {len(rows)} records to {args.out}")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="rig",
@@ -367,6 +451,15 @@ def build_parser() -> argparse.ArgumentParser:
     interval.add_argument("--miles", type=int, help="Miles interval, 0 for none")
     interval.add_argument("--months", type=int, help="Months interval, 0 for none")
     interval.set_defaults(func=cmd_interval)
+
+    spend = subparsers.add_parser("spend", help="Totals by vehicle and year")
+    spend.add_argument("--vehicle", help="Vehicle name or #id (default: all)")
+    spend.add_argument("--year", type=int, help="Only this year")
+    spend.set_defaults(func=cmd_spend)
+
+    export = subparsers.add_parser("export", help="Write all records to a CSV file")
+    export.add_argument("--out", required=True, help="Path to write, e.g. rig.csv")
+    export.set_defaults(func=cmd_export)
 
     return parser
 
